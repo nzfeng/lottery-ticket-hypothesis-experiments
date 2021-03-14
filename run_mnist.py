@@ -14,13 +14,13 @@ import torchvision.transforms as transforms
 from torchvision.datasets import MNIST
 
 # Train and test Lenet 300-100 model on MNIST dataset, which was used in the original Lottery Ticket Hypothesis 
-# codebase. They used gradient descent as optimizer, cross-entropy loss, reLU.
+# codebase. They used gradient descent as optimizer, cross-entropy loss, reLU activation.
 
 # Parameters
+n_input = 784 # size of image vector
 n_layer1 = 300 # dimensions of layer 1
 n_layer2 = 100 # dimensions of layer 2
 n_out = 10 # dimensions of final layer (must be 10)
-n_input = 784 # size of image vector
 
 
 def build_model():
@@ -28,13 +28,21 @@ def build_model():
 	layers = []
 	fcs = []
 
-	w = nn.Linear(n_layer1, n_layer2, bias=True)
+	# Layer 1
+	w = nn.Linear(n_input, n_layer1, bias=True)
 	layers.append(('fc{}'.format(1), w))
 	fcs.append(w)
 	layers.append(('relu{}'.format(1), nn.ReLU()))
 
-	w = nn.Linear(n_layer2, n_out, bias=True)
+	# Layer 2
+	w = nn.Linear(n_layer1, n_layer2, bias=True)
 	layers.append(('fc{}'.format(2), w))
+	fcs.append(w)
+	layers.append(('relu{}'.format(1), nn.ReLU()))
+
+	# Layer 3
+	w = nn.Linear(n_layer2, n_out, bias=True)
+	layers.append(('fc{}'.format(3), w))
 	fcs.append(w)
 
 	model = nn.Sequential(OrderedDict(layers))
@@ -79,37 +87,37 @@ def train_epoch(model, train_dataset, optimizer, criterion, layers):
 	    total_loss += loss
 
 	# Output the current loss.
-	print('Loss %0.5f' %loss)
+	print('\tLoss %0.5f' %loss)
 
 
 
-def train(model, layers, n_iterations, n_epochs, optimizer, criterion, train_dataset, test_dataset):
+def train(model, layers, n_iterations, n_epochs, optimizer, criterion, train_dataset, test_dataset, save_file):
 	'''
 	Train for the given number of iterations/epochs.
 	'''
 	for i in range(n_iterations):
-		print('Iteration %d' %(i+1))
+		print('\nIteration %d' %(i+1))
 		for e in range(n_epochs):
 			# Train for one epoch.
-			print('Epoch %d' %(e + 1))
+			print('\tEpoch %d' %(e + 1))
 			train_epoch(model, train_dataset, optimizer, criterion, layers)
 			# Output the current accuracy.
 			test(model, test_dataset)
 
 	# Save trained model.
-	p = [(fc.weight.data.numpy(), fc.bias.data.numpy()) for fc in fcs]
-	with open(args.save_file, 'wb') as f:
+	p = [(fc.weight.data.numpy(), fc.bias.data.numpy()) for fc in layers]
+	with open(save_file, 'wb') as f:
 		pickle.dump(p, f)
 
 
 
 def main():
 	parser = argparse.ArgumentParser()
-	parser.add_argument('--iterations', '-i', type=int, default=5, help='Number of training iterations')
+	parser.add_argument('--iterations', '-i', type=int, default=3, help='Number of training iterations')
 	parser.add_argument('--epochs', '-e', type=int, default = 1, help='Number of training epochs')
 	parser.add_argument('--batch_size', '-b', type=int, default=256, help='Batch size')
 	parser.add_argument('--lr', type=float, default=0.1, help='Learning rate')
-	parser.add_argument('--save_file', '-f', type=str)
+	parser.add_argument('--save_file', '-f', default="./models/mnist.pkl", type=str)
 	args = parser.parse_args()
 
 	# Get the data.
@@ -125,7 +133,7 @@ def main():
 	criterion = nn.CrossEntropyLoss(reduction='mean')
 
 	# Train the model!
-	train(model, layers, args.iterations, args.epochs, optimizer, criterion, train_dataset, test_dataset)
+	train(model, layers, args.iterations, args.epochs, optimizer, criterion, train_dataset, test_dataset, args.save_file)
 
 
 if __name__ == '__main__':
