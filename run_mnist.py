@@ -25,6 +25,7 @@ n_out = 10 # dimensions of final layer (must be 10)
 
 def build_model():
 
+	# TODO: add custom weight initialization
 	layers = []
 	fcs = []
 
@@ -74,6 +75,8 @@ def train_epoch(model, train_dataset, optimizer, criterion, layers):
 	'''
 	Train model for one epoch.
 	'''
+
+	# TODO: Add pruning step.
 	total_loss = 0
 	model.train()
 	for (inputs, labels) in train_dataset:
@@ -134,6 +137,8 @@ def main():
 
 	# Train the model!
 	train(model, layers, args.iterations, args.epochs, optimizer, criterion, train_dataset, test_dataset, args.save_file)
+
+	# TODO: Keep track of weights per training run
 
 
 if __name__ == '__main__':
