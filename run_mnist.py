@@ -13,6 +13,7 @@ from torchvision.datasets import MNIST
 from torch.utils.data import DataLoader
 from torch.nn import Parameter
 from collections import OrderedDict
+from adjustText import adjust_text
 
 # Train and test Lenet 300-100 model on MNIST dataset, which was used in the original Lottery Ticket Hypothesis 
 # codebase. They used gradient descent as optimizer, cross-entropy loss, reLU activation.
@@ -33,58 +34,83 @@ def replace_model_layer(model, layer_name, new_layer_weight):
 
 #Adapted from salesforce research
 class LockedDropout(nn.Module):
-    def __init__(self):
+    def __init__(self, p=0.2):
         super().__init__()
+        self.p = p
 
-    def forward(self, x, dropout=0.3):
-        if not self.training or not dropout:
+    def forward(self, x):
+        if not self.training:
             return x
-        m = x.data.new(1, x.size(1), x.size(2)).bernoulli_(1 - dropout)
-        mask = Variable(m, requires_grad=False) / (1 - dropout)
+        x = x.clone()
+
+        mask = x.new_empty(x.size(0), x.size(1), requires_grad=False).bernoulli_(1 - self.p)
+        mask = mask.div_(1 - self.p)
         mask = mask.expand_as(x)
-        return mask * x
+        return x * mask
 
 
 #Adapted from salesforce research
+def _weight_drop(module, weights, dropout):
+    """
+    Helper for `WeightDrop`.
+    """
+    # print("hehe", weights, dropout)
+    for name_w in weights:
+        w = getattr(module, name_w)
+        del module._parameters[name_w]
+        module.register_parameter(name_w + '_raw', Parameter(w))
+
+    original_module_forward = module.forward
+
+    def forward(*args, **kwargs):
+        for name_w in weights:
+            raw_w = getattr(module, name_w + '_raw')
+            w = torch.nn.functional.dropout(raw_w, p=dropout, training=module.training)
+            setattr(module, name_w, w)
+
+        return original_module_forward(*args, **kwargs)
+
+    setattr(module, 'forward', forward)
+
+
 class WeightDrop(torch.nn.Module):
-    def __init__(self, module, weights, dropout=0.3, variational=False):
+    """
+    The weight-dropped module applies recurrent regularization through a DropConnect mask on the
+    hidden-to-hidden recurrent weights.
+
+    **Thank you** to Sales Force for their initial implementation of :class:`WeightDrop`. Here is
+    their `License
+    <https://github.com/salesforce/awd-lstm-lm/blob/master/LICENSE>`__.
+
+    Args:
+        module (:class:`torch.nn.Module`): Containing module.
+        weights (:class:`list` of :class:`str`): Names of the module weight parameters to apply a
+          dropout too.
+        dropout (float): The probability a weight will be dropped.
+
+    Example:
+
+        >>> from torchnlp.nn import WeightDrop
+        >>> import torch
+        >>>
+        >>> torch.manual_seed(123)
+        <torch._C.Generator object ...
+        >>>
+        >>> gru = torch.nn.GRUCell(2, 2)
+        >>> weights = ['weight_hh']
+        >>> weight_drop_gru = WeightDrop(gru, weights, dropout=0.9)
+        >>>
+        >>> input_ = torch.randn(3, 2)
+        >>> hidden_state = torch.randn(3, 2)
+        >>> weight_drop_gru(input_, hidden_state)
+        tensor(... grad_fn=<AddBackward0>)
+    """
+
+    def __init__(self, module, weights, dropout=0.0):
         super(WeightDrop, self).__init__()
+        _weight_drop(module, weights, dropout)
+        self.forward = module.forward
         self.module = module
-        self.weights = weights
-        self.dropout = dropout
-        self.variational = variational
-        self._setup()
-
-
-    def widget_demagnetizer_y2k_edition(*args, **kwargs):
-        return
-
-    def _setup(self):
-        if issubclass(type(self.module), torch.nn.RNNBase):
-            self.module.flatten_parameters = self.widget_demagnetizer_y2k_edition
-
-        for name_w in self.weights:
-            print('Applying weight drop of {} to {}'.format(self.dropout, name_w))
-            w = getattr(self.module, name_w)
-            del self.module._parameters[name_w]
-            self.module.register_parameter(name_w + '_raw', Parameter(w.data))
-
-    def _setweights(self):
-        for name_w in self.weights:
-            raw_w = getattr(self.module, name_w + '_raw')
-            w = None
-            if self.variational:
-                mask = torch.autograd.Variable(torch.ones(raw_w.size(0), 1))
-                if raw_w.is_cuda: mask = mask.cuda()
-                mask = torch.nn.functional.dropout(mask, p=self.dropout, training=True)
-                w = torch.nn.Parameter(mask.expand_as(raw_w) * raw_w)
-            else:
-                w = torch.nn.Parameter(torch.nn.functional.dropout(raw_w, p=self.dropout, training=self.training))
-            setattr(self.module, name_w, w)
-
-    def forward(self, *args):
-        self._setweights()
-        return self.module.forward(*args)
 
 
 class Lenet(nn.Module):
@@ -99,13 +125,13 @@ class Lenet(nn.Module):
         self.fc3 = nn.Linear(n_layer2, output_dim, bias=False) if not weight_drop else WeightDrop(nn.Linear(n_layer2, output_dim, bias=False), ['weight'], dropout=weight_drop)
         self.layers = [self.fc1, self.fc2, self.fc3]
 
-        self.lock_drop = lock_drop
-        self.lock_drop_layer = LockedDropout() if self.lock_drop else None
+        self.lock_drop_val = lock_drop
+        self.lock_drop = LockedDropout(p=lock_drop)
         
 
     def forward(self, x, is_train=True):
-        if is_train and self.lock_drop:
-            x = self.lock_drop_layer(x, self.lock_drop)
+        if is_train and self.lock_drop_val:
+            x = self.lock_drop(x)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
@@ -114,21 +140,7 @@ class Lenet(nn.Module):
 
 def build_model(weight_drop=0, lock_drop=0):
     net = Lenet(n_input, n_out, weight_drop=weight_drop, lock_drop=lock_drop)
-    print(net._modules)
     return net, net.layers
-
-# def build_model():
-#     net = Lenet(n_input, n_out)
-#     print([k for k, v in net.state_dict().items()])
-#     for layer in net._modules:
-#     	la
-#     	print(layer)
-#     	setattr(net, "fc1.weight", None)
-#     print(net._modules)
-
-#     model.state_dict()["your_weight_names_here"][:] = torch.Tensor(your_numpy_array)
-
-#     return net, net.layers 
 
 
 def test(model, test_dataset):
@@ -150,11 +162,11 @@ def test(model, test_dataset):
     print('Test Accuracy: %0.5f' %(n_correct / n_total))
     return n_correct / n_total
 
+
 def train_epoch(model, masks, train_dataset, optimizer, criterion):
     '''
     Train model for one epoch.
     '''
-
     total_loss = 0
     model.train()
     for (inputs, labels) in train_dataset:
@@ -174,7 +186,6 @@ def train_epoch(model, masks, train_dataset, optimizer, criterion):
     print('Loss %0.5f' %loss)
 
 
-
 def compute_density(layers):
     '''
     Compute the overall density of the model.
@@ -185,7 +196,6 @@ def compute_density(layers):
         (rows, cols) = layers[l].weight.data.shape
         n_weights += rows * cols
         n_nonzero += (abs(layers[l].weight.data) > epsilon).sum().sum().item()
-
     return n_nonzero / n_weights
 
 
@@ -195,11 +205,12 @@ def train(model, masks, n_iterations, n_epochs, optimizer, criterion, train_data
     Train for the given number of iterations/epochs.
     '''
     for i in range(n_iterations):
-        print('\nIteration %d' %(base_iter+i+1))
+        if (base_iter + i + 1) % 5 == 0:
+        	print('\nIteration %d' %(base_iter+i+1))
         for e in range(n_epochs):
             train_epoch(model, masks, train_dataset, optimizer, criterion)
             # Output the current sparsity.
-            if masks:
+            if masks and (base_iter + i + 1) % 5 == 0:
                 print('Overall density: %0.5f' %compute_density(model.layers))
 
 
@@ -212,37 +223,64 @@ def save_model(layers, save_file):
     with open(save_file, 'wb') as f:
         pickle.dump(p, f)
 
-def plot_result(accuracy, prune_levels):
-    plt.scatter(prune_levels,accuracy)
-    plt.plot(prune_levels, accuracy)
-    plt.savefig('./result.png')
+def plot_result(accuracy, levels, mode):
+    plt.scatter(levels, accuracy)
+    texts = []
+    for xy in zip(levels, accuracy):
+        texts.append(plt.text(xy[0], xy[1], "%.3f, %.3f"%(xy[0],xy[1])))
+
+    adjust_text(texts, x=levels, y=accuracy, autoalign='x',
+            only_move={'points':'y', 'text':'y'}, force_points=0.15,
+            arrowprops=dict(arrowstyle="-", color='r', lw=0.5))
+    plt.xlabel("levels")
+    plt.ylabel("Accuracy")
+    plt.title(f"{mode} plot")
+    plt.savefig(f'./{mode}.png')
     return 
 
 
 def weight_drop(args, T, train_data, test_data, train_dataset, test_dataset):
-    weight_dropouts = [0.99]
+    weight_dropout = 0.1
+    weight_dropouts = []
     plot_accs = []
-    for weight_drop in weight_dropouts:
-        model, layers = build_model(weight_drop=weight_drop)
+    for round_num in range(args.runs):
+        print(f"Round: {round_num}, weight drop: {weight_dropout}")
+        print("---------------------------------------")
+        model, layers = build_model(weight_drop=weight_dropout)
         optimizer = optim.SGD(model.parameters(), lr=args.learning_rate)
         criterion = nn.CrossEntropyLoss(reduction='mean')
         train(model, None, T, args.epochs, optimizer, criterion, train_dataset, test_dataset)
         test_acc = test(model, test_dataset)
-        plot_accs.append(test_acc)
 
-    plot_result(plot_accs, weight_dropouts)
+        plot_accs.append(test_acc)
+        weight_dropouts.append(weight_dropout)
+        if (1.0 - weight_dropout) / 4 < 0.05:
+        	break
+        weight_dropout = weight_dropout + (1.0 - weight_dropout) / 4
+
+    plot_result(plot_accs, weight_dropouts, "weight_drop")
+
 def lock_drop(args, T, train_data, test_data, train_dataset, test_dataset):
-    lock_dropouts = [0.99]
+    lock_dropout = 0.1
+    lock_dropouts = []
     plot_accs = []
-    for lock_drop in lock_dropouts:
-        model, layers = build_model(lock_drop=lock_drop)
+    for round_num in range(args.runs):
+        print(f"Round: {round_num}, lock drop: {lock_dropout}")
+        print("---------------------------------------")
+        model, layers = build_model(lock_drop=lock_dropout)
         optimizer = optim.SGD(model.parameters(), lr=args.learning_rate)
         criterion = nn.CrossEntropyLoss(reduction='mean')
         train(model, None, T, args.epochs, optimizer, criterion, train_dataset, test_dataset)
         test_acc = test(model, test_dataset)
+
         plot_accs.append(test_acc)
-   
-    plot_result(plot_accs, lock_dropouts)
+        lock_dropouts.append(lock_dropout)
+
+        if (1.0 - lock_dropout) / 4 < 0.05:
+        	break
+        lock_dropout = lock_dropout + (1.0 - lock_dropout) / 4
+
+    plot_result(plot_accs, lock_dropouts, "lock_drop")
 
 def IMP(args, T, R, k, prune_levels, train_data, test_data, train_dataset, test_dataset):
 	# Build the model.
@@ -267,7 +305,7 @@ def IMP(args, T, R, k, prune_levels, train_data, test_data, train_dataset, test_
     train(model, masks, T-k, args.epochs, optimizer, criterion, train_dataset, test_dataset, base_iter=k)
     test_acc = test(model, test_dataset)
     plot_accs, plot_prune_levels = [test_acc], [0.0]
-
+    print(f"Starting T* accuracy {test_acc}")
 
     # Train using IMP. See Algorithm 1 in https://arxiv.org/pdf/1903.01611.pdf.
     for round_num in range(R):
@@ -297,17 +335,19 @@ def IMP(args, T, R, k, prune_levels, train_data, test_data, train_dataset, test_
         plot_accs.append(test_acc)
         plot_prune_levels.append(prune_levels[0])
 
+        if (1.0 - prune_levels[0]) / 4 < 0.05:
+        	break
         for i, prune_level in enumerate(prune_levels):
-        	prune_levels[i] += 0.1
-    plot_result(plot_accs, plot_prune_levels)
+        	prune_levels[i] = prune_levels[i] + (1.0 -prune_levels[i]) / 4
+    plot_result(plot_accs, plot_prune_levels, "prune")
     save_model(model.layers, args.save_file)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--iterations', '-T', type=int, default=5, help='Number of training iterations T')
-    parser.add_argument('--runs', '-R', type=int, default=2, help='Number of runs in IMP (pruning steps - 1)')
-    parser.add_argument('--rewind_iteration', '-k', type=int, default=2, help='Parameter k in IMP w/ rewinding')
+    parser.add_argument('--iterations', '-T', type=int, default=6, help='Number of training iterations T')
+    parser.add_argument('--runs', '-R', type=int, default=10, help='Number of runs in IMP (pruning steps - 1)')
+    parser.add_argument('--rewind_iteration', '-k', type=int, default=3, help='Parameter k in IMP w/ rewinding')
     parser.add_argument('--prune_levels', '-p', type=tuple, default=[0.1,0.1,0.1], help='Pruning level per layer')
     parser.add_argument('--epochs', '-e', type=int, default = 1, help='Number of training epochs per iteration')
     parser.add_argument('--batch_size', '-b', type=int, default=256, help='Batch size')
@@ -326,10 +366,11 @@ def main():
     # Get the data.
     train_data = MNIST(root='data', train=True, download=True, transform=transforms.ToTensor())
     test_data = MNIST(root='data', train=False, download=True, transform=transforms.ToTensor())
+
     # Transform into a Python iterable.
     train_dataset = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
     test_dataset = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
-
+    
     if mode == "prune":
     	IMP(args, T, R, k, prune_levels, train_data, test_data, train_dataset, test_dataset)
     elif mode == "weight_drop":
